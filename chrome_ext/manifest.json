@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "妙手 SKU 智能录入助手",
+  "version": "1.0",
+  "description": "点击图标即可在任意页面呼出 SKU 自动化录入面板",
+  "permissions": [
+    "activeTab",
+    "scripting"
+  ],
+  "action": {
+    "default_title": "启动/关闭妙手 SKU 助手"
+  },
+  "background": {
+    "service_worker": "background.js"
+  }
+}
