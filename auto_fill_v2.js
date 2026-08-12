@@ -26,7 +26,9 @@
     panel.innerHTML = `
         <div id="miaoshou-close-btn" style="position: absolute; top: 10px; right: 15px; cursor: pointer; font-size: 16px; color: #999; font-weight: bold;">✕</div>
         <h3 style="margin-top: 0; font-size: 16px;">🤖 SKU 智能录入引擎</h3>
-        <p style="font-size: 12px; color: #666;">格式: 颜色-尺寸-编码-价格-库存-状况-平台sku-促销价-促销时间</p>
+        <p style="font-size: 12px; color: #666;">格式: 颜色-尺寸-编码-价格-库存-状况-平台sku-促销价-促销时间-[图片名]</p>
+        
+        <div style="font-size: 12px; margin-bottom: 5px; font-weight: bold;">选择数据文件 (.txt)</div>
         <input type="file" id="sku-file-input" accept=".txt,.csv" style="margin-bottom: 10px; width: 100%;" />
         <div id="sku-status" style="font-size: 12px; margin-bottom: 10px; color: #333; background: #f5f5f5; padding: 5px; border-radius: 4px;">等待选择文件...</div>
         <button id="btn-start-auto" disabled style="padding: 10px 12px; background: #67C23A; color: #fff; border: none; border-radius: 4px; cursor: pointer; width: 100%; font-weight: bold; font-size: 14px;">▶ 一键全自动执行 (变体 + 填充)</button>
@@ -42,6 +44,32 @@
     let parsedData = [];
     let uniqueColors = [];
     let uniqueSizes = [];
+    
+    // 全局图片文件存储
+    let selectedImageFiles = {};
+    
+
+
+    // 拦截全局的文件上传框，实现无头注入
+    let targetFileForUpload = null;
+    const originalClick = HTMLInputElement.prototype.click;
+    HTMLInputElement.prototype.click = function() {
+        if (this.type === 'file' && targetFileForUpload) {
+            try {
+                const dt = new DataTransfer();
+                dt.items.add(targetFileForUpload);
+                this.files = dt.files;
+                targetFileForUpload = null;
+                this.dispatchEvent(new Event('change', { bubbles: true }));
+                return; // 阻止弹出系统文件选择框
+            } catch (err) {
+                console.error("图片注入失败", err);
+            }
+        }
+        originalClick.apply(this, arguments);
+    };
+    
+
 
     // 辅助函数：模拟 Vue 输入
     function setNativeValue(element, value) {
@@ -77,8 +105,6 @@
             let sizesSet = new Set();
 
             lines.forEach(line => {
-                // 因为数据格式是 "值"-"值"-"值"，如果只按 "-" 分割会把 SKU 内部的 - 也切断
-                // 所以我们可以先去掉首尾的引号，然后再按 "-" 分割
                 let cleanLine = line.trim();
                 if (cleanLine.startsWith('"') && cleanLine.endsWith('"')) {
                     cleanLine = cleanLine.substring(1, cleanLine.length - 1);
@@ -97,7 +123,8 @@
                         condition: parts[5],
                         platformSku: parts[6],
                         promoPrice: parts[7],
-                        promoTime: parts.slice(8).join('"-"') // 如果时间里也有 "-"，我们把它拼回来
+                        promoTime: parts[8] || '', 
+                        imageName: parts[9] || '' // 第10列为图片名
                     });
                     colorsSet.add(color);
                     sizesSet.add(size);
@@ -207,10 +234,30 @@
             if (colorItem) await fillAttribute(colorItem, uniqueColors);
             if (sizeItem) await fillAttribute(sizeItem, uniqueSizes);
             
-            document.getElementById('sku-status').innerHTML = '步骤 2/3: 等待表格生成...';
-            await new Promise(r => setTimeout(r, 2500)); // 给页面2.5秒重新生成虚拟表格
+            document.getElementById('sku-status').innerHTML = '步骤 2/3: 尝试确认提示框并等待表格生成...';
             
-            document.getElementById('sku-status').innerHTML = '步骤 3/3: 正在自动填充表格...';
+            // 循环等待（最长30秒），并尝试自动点击弹出框的“确认”按钮
+            for (let i = 0; i < 60; i++) {
+                // 尝试找寻网页中可能存在的确认按钮（比如 el-message-box__btns 的主按钮，或是带有“确 定”、“保存”字样的按钮）
+                const confirmBtns = Array.from(document.querySelectorAll('.el-message-box__btns button.el-button--primary, .jx-dialog__footer button.jx-button--primary, .el-dialog__footer button.el-button--primary'));
+                for (let cBtn of confirmBtns) {
+                    if (cBtn.offsetParent !== null) { // 元素可见
+                        cBtn.click();
+                        console.log("自动点击了确认弹窗");
+                    }
+                }
+                
+                // 等待表格出现，且行数大于0
+                const curRows = document.querySelectorAll('.pro-virtual-table__row');
+                if (curRows.length > 0) {
+                    // 多等1秒，确保 Vue 完全渲染完成并且图片上传按钮挂载好了
+                    await new Promise(r => setTimeout(r, 1000));
+                    break;
+                }
+                await new Promise(r => setTimeout(r, 500));
+            }
+            
+            document.getElementById('sku-status').innerHTML = '步骤 3/3: 正在自动填充表格与上传图片...';
             await startFillingLogic();
             
             document.getElementById('sku-status').innerHTML = '✅ 全自动提效完成！';
@@ -331,6 +378,46 @@
                             conditionInput.blur();
                         }
                     }
+                    
+                    // ================= 新增：自动上传图片 =================
+                    // 但我们需要找的是 picture-table-list 里面的对应图片的上传按钮
+                    // 因为妙手里面图片通常在单独的图片区域 (picture-table-list)
+                    if (match.imageName) {
+                        try {
+                            // 绕过浏览器限制，从我们本地开的后门服务中直接获取绝对路径的图片内容！
+                            const imgUrl = 'http://localhost:31415/?path=' + encodeURIComponent(match.imageName);
+                            const res = await fetch(imgUrl);
+                            if (res.ok) {
+                                const blob = await res.blob();
+                                const filename = match.imageName.split('/').pop() || 'image.jpg';
+                                const file = new File([blob], filename, { type: blob.type || 'image/jpeg' });
+                                
+                                const picRows = Array.from(document.querySelectorAll('.picture-table-item, .product-picture-item'));
+                                const uploadBtn = row.querySelector('.shopee-icon-shangchuantupian') || row.querySelector('i[class*="shangchuantupian"]');
+                                
+                                if (uploadBtn) {
+                                    targetFileForUpload = file;
+                                    uploadBtn.click();
+                                    await new Promise(r => setTimeout(r, 800));
+                                } else {
+                                    for (let pRow of picRows) {
+                                        if (pRow.textContent.includes(match.color)) {
+                                            const pBtn = pRow.querySelector('.shopee-icon-shangchuantupian');
+                                            if (pBtn) {
+                                                targetFileForUpload = file;
+                                                pBtn.click();
+                                                await new Promise(r => setTimeout(r, 800));
+                                            }
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (err) {
+                            console.error("加载绝对路径图片失败", err);
+                        }
+                    }
+                    // ====================================================
 
                     currentBatchFilled++;
                     await new Promise(r => setTimeout(r, 100));
